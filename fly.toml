@@ -1,0 +1,58 @@
+# Fly.io configuration for gh-issue-agent.
+#
+# !! SECURITY-CRITICAL !!
+# Do NOT add [http_service], [[services]], [[services.ports]] or any other
+# block that registers the app with the Fly proxy. Doing so re-enables the
+# `<app>.fly.dev` ingress, which bypasses Cloudflare Access (OIDC) entirely
+# and exposes Anthropic / GitHub credentials to the public internet.
+#
+# Ingress must go exclusively through the cloudflared sidecar -> Cloudflare
+# Tunnel -> Cloudflare Access. After every `fly deploy`, verify with
+# `fly ips list` that no public IPv4/IPv6 has been re-allocated, and run
+# `scripts/fly-release-public-ips.sh` to remove any that exist.
+#
+# IMPORTANT: do NOT run `fly launch` for this app. `fly launch` rewrites
+# this file and re-injects [http_service]. Use `fly apps create` to
+# bootstrap the app, then drive deploys with this committed file.
+#
+# See docs/deploy-fly.md for the full setup walkthrough (volumes, secrets,
+# Cloudflare Access OIDC).
+
+app = 'gh-issue-agent'
+primary_region = 'nrt'
+
+[build]
+
+[env]
+  HOST = '0.0.0.0'
+  PORT = '3000'
+  LOG_LEVEL = 'info'
+  DB_PATH = '/data/dashboard.db'
+
+[[mounts]]
+  source = 'data'
+  destination = '/data'
+  initial_size = '1gb'
+  auto_extend_size_threshold = 80
+  auto_extend_size_increment = '1gb'
+  auto_extend_size_limit = '10gb'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+
+[deploy]
+  strategy = 'immediate'
+
+[[restart]]
+  policy = 'always'
+
+[checks]
+  [checks.tcp-3000]
+    port = 3000
+    type = 'tcp'
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '30s'

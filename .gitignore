@@ -1,0 +1,7 @@
+node_modules/
+.env
+.github-issue-agent/
+coverage/
+dist/
+!.sisyphus/
+.sisyphus/
