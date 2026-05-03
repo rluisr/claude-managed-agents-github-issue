@@ -69,6 +69,7 @@ function createMockDb() {
 
   const db = {
     getPrompt: () => null,
+    getRepoPrompt: () => null,
     insertChildTaskResult: (runId: string, result: ChildTaskResult) => {
       calls.childTaskResults.push({ result: structuredClone(result), runId });
     },

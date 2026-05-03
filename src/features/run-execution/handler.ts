@@ -61,6 +61,7 @@ type ParentTools = ReadonlyArray<NonNullable<AgentCreateParams["tools"]>[number]
 export type RunExecutionDb = Pick<
   DashboardDbModule,
   | "getPrompt"
+  | "getRepoPrompt"
   | "insertChildTaskResult"
   | "insertRun"
   | "insertSession"
@@ -190,6 +191,24 @@ function parseRepoRef(repo: string): RepoRef {
   }
 
   return { name, owner };
+}
+
+function readRepoPromptBody(
+  db: RunExecutionDb,
+  repo: string,
+  agent: "parent" | "child",
+  logger: Logger,
+): string | null {
+  try {
+    const row = db.getRepoPrompt(repo, agent);
+    if (row && typeof row.body === "string" && row.body.trim().length > 0) {
+      return row.body;
+    }
+  } catch (err) {
+    logger.warn({ agent, err, repo }, "failed to load repo prompt; falling back to global only");
+  }
+
+  return null;
 }
 
 function resolveBaseBranch(
@@ -736,6 +755,10 @@ export async function runIssueOrchestration(
       await anthropicClient.beta.sessions.delete(parentSession.id);
     });
 
+    const repoSlug = `${owner}/${repoName}`;
+    const repoParentPromptBody = readRepoPromptBody(db, repoSlug, "parent", logger);
+    const repoChildPromptBody = readRepoPromptBody(db, repoSlug, "child", logger);
+
     const parentPromptText = deps.buildParentPrompt({
       baseBranch,
       branch,
@@ -745,6 +768,7 @@ export async function runIssueOrchestration(
       parentIssueNumber: issue.number,
       repoName,
       repoOwner: owner,
+      repoPrompt: repoParentPromptBody,
     });
 
     await anthropicClient.beta.sessions.events.send(parentSession.id, {
@@ -832,6 +856,7 @@ export async function runIssueOrchestration(
             environmentId: environment.environmentId,
             githubToken,
             logger,
+            repoPrompt: repoChildPromptBody,
             onSessionCreated: async (childSessionId) => {
               runState = {
                 ...(runState as RunState),

@@ -27,6 +27,11 @@ export type HandleSpawnChildTaskContext = {
   registerCleanup: (cleanupFn: () => Promise<void>) => void;
   signal?: AbortSignal;
   onSessionCreated?: (sessionId: string) => void | Promise<void>;
+  /**
+   * Repository-specific instructions appended to the child runtime prompt.
+   * Pass null/undefined for repos without an override.
+   */
+  repoPrompt?: string | null;
 };
 
 export type HandleSpawnChildTaskOutput = z.infer<typeof SpawnChildTaskOutput>;
@@ -278,6 +283,7 @@ export async function handleSpawnChildTask(
     priorCommits: parsedArgs.priorCommits,
     repoName: ctx.repo.name,
     repoOwner: ctx.repo.owner,
+    repoPrompt: ctx.repoPrompt ?? null,
     task: {
       acceptanceCriteria: parsedArgs.acceptanceCriteria,
       description: parsedArgs.description,

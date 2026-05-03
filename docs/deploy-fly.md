@@ -6,20 +6,19 @@ This guide walks through hosting `github-issue-agent` on Fly.io.
 > `github` (anti-phishing filter), so the bundled `fly.toml` uses
 > `gh-issue-agent`. Pick whatever you like, just avoid `github`.
 
-> **Ingress note.** The committed `fly.toml` does NOT contain
-> `[http_service]`, `[[services]]`, or `[[services.ports]]`, so the app is
-> not registered with the Fly proxy and `<app>.fly.dev` will not route to
-> it. To expose the server publicly you must either (a) add an
-> `[http_service]` block to `fly.toml` and redeploy, or (b) front the
-> machine with your own ingress (reverse proxy / VPN / etc.) on the Fly
-> private network.
+> **Ingress note.** The committed `fly.toml` exposes two `[[services]]`:
+> port 3000 via `<app>.fly.dev` (HTTP/HTTPS) for the Hono dashboard, and
+> port 8096 via `<app>.fly.dev:8096` (HTTPS) for the mcp-proxy sidecar.
+> Single-Machine deployment is intentional — splitting the two across
+> Machines would break SSE session affinity for the Remote MCP transport.
 
 ```
-[ User Browser ]
-    │  (your chosen ingress: http_service / private network / external proxy)
-    ▼
+[ User Browser ]                    [ Claude Managed Agents ]
+    │  :80 / :443                       │  :8096
+    ▼                                   ▼
 [ Fly Machine (nrt) ]
-  ├─ bun run index.ts          (Hono SSR + run queue + SSE)
+  ├─ bun run index.ts            (Hono SSR + run queue + SSE)   :3000
+  ├─ mcp-proxy --named-server-config /etc/mcp-proxy/...         :8096
   └─ /data volume → SQLite + agent state
 ```
 
@@ -27,9 +26,10 @@ The repo ships these supporting files:
 
 | File | Purpose |
 |---|---|
-| `Dockerfile` | Multi-stage build: deps → Tailwind CSS → runtime |
-| `scripts/start.sh` | Spawns `bun`, sets up state symlink, propagates signals |
-| `fly.toml` | Single-machine config, `/data` volume, TCP healthcheck |
+| `Dockerfile` | Multi-stage build: deps → Tailwind CSS → runtime (incl. mcp-proxy venv + Node.js for `npx`-based MCP servers) |
+| `mcp-proxy.json` | `--named-server-config` template, baked into the image at `/etc/mcp-proxy/mcp-proxy.json` |
+| `scripts/start.sh` | Spawns `bun` and `mcp-proxy` in parallel, propagates signals, exits when either dies |
+| `fly.toml` | Single-machine config, `/data` volume, two `[[services]]` (3000 / 8096) |
 | `.dockerignore` | Strips local state and tests from build context |
 
 ## Prerequisites
@@ -50,6 +50,46 @@ fly volumes create data --size 1 --region nrt --app gh-issue-agent
 
 If you prefer `fly launch`, be aware that it rewrites `fly.toml` and may
 inject an `[http_service]` block. Review the diff before committing.
+
+## 1.5. Configure mcp-proxy (Remote MCP)
+
+The `mcp-proxy` sidecar exposes stdio MCP servers as HTTP/SSE endpoints
+that Claude Managed Agents can register as Remote MCP servers.
+
+The default template at the repo root, `mcp-proxy.json`, is copied to
+`/etc/mcp-proxy/mcp-proxy.json` inside the image. To register your own
+backends, edit the template and redeploy:
+
+```jsonc
+{
+  "mcpServers": {
+    "<server-name>": {
+      "command": "npx",
+      "args": ["-y", "<package-name>", "--stdio"],
+      "env": { "EXAMPLE_API_KEY": "..." }
+    }
+  }
+}
+```
+
+> **`env` and secrets.** `--pass-environment` is enabled, so anything set
+> via `fly secrets set` is visible to spawned MCP servers. Prefer that
+> over inline `env` for credentials.
+
+> **Server name → URL path.** The map key becomes a URL segment, so
+> stick to URL-safe characters (kebab-case is recommended). The shipped
+> example uses `"Framelink MCP for Figma"`, which works but requires
+> `%20` encoding when registering the URL with Claude.
+
+Once deployed, each server is reachable at:
+
+```text
+https://<app>.fly.dev:8096/servers/<server-name>/mcp     # Streamable HTTP
+https://<app>.fly.dev:8096/servers/<server-name>/sse     # SSE (legacy)
+```
+
+Register the appropriate URL in the Claude Managed Agents `mcp_servers`
+configuration.
 
 ## 2. Set Fly secrets
 
@@ -103,6 +143,21 @@ fly deploy --app gh-issue-agent
 - **`HOST` is `127.0.0.1`**
   → Something overrode `HOST`. Inside the container it must be `0.0.0.0`
     so external ingress can reach the server.
+
+- **mcp-proxy returns `404` on `/servers/<name>/mcp`**
+  → The server name doesn't match a key in `mcp-proxy.json`. URL-encode
+    spaces (`%20`). Verify the running config inside the machine:
+    `fly ssh console --app gh-issue-agent -C 'cat /etc/mcp-proxy/mcp-proxy.json'`.
+
+- **mcp-proxy fails to spawn an `npx`-based server**
+  → Check logs with `fly logs --app gh-issue-agent | grep mcp-proxy`.
+    The first invocation downloads the package into `/home/bun/.npm`,
+    which can take 10–30s; subsequent calls are cached.
+
+- **Either bun or mcp-proxy keeps restarting**
+  → `start.sh` tears down the surviving process when either dies, so a
+    crash loop in one (e.g. an mcp-proxy config error) will visibly
+    restart the other. Tail `fly logs` to see which one exits first.
 
 ## Cost notes
 

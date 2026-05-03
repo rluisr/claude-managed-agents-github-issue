@@ -1,5 +1,12 @@
 # Fly.io configuration for gh-issue-agent.
 #
+# Two services share one Machine (single-Machine deployment is intentional;
+# splitting bun and mcp-proxy across Machines would break SSE session
+# affinity for Remote MCP clients):
+#
+#   - 3000: Hono dashboard / run API   (public via :80/:443)
+#   - 8096: mcp-proxy named-server     (public via :8096/TLS)
+#
 # See docs/deploy-fly.md for the full setup walkthrough (volumes, secrets).
 
 app = 'gh-issue-agent'
@@ -12,6 +19,10 @@ primary_region = 'nrt'
   PORT = '3000'
   LOG_LEVEL = 'info'
   DB_PATH = '/data/dashboard.db'
+  MCP_PROXY_HOST = '0.0.0.0'
+  MCP_PROXY_PORT = '8096'
+  MCP_PROXY_CONFIG = '/etc/mcp-proxy/mcp-proxy.json'
+  MCP_PROXY_ALLOW_ORIGIN = '*'
 
 [[mounts]]
   source = 'data'
@@ -33,10 +44,38 @@ primary_region = 'nrt'
 [[restart]]
   policy = 'always'
 
-[checks]
-  [checks.tcp-3000]
-    port = 3000
-    type = 'tcp'
+# --- main dashboard / run API ----------------------------------------------
+[[services]]
+  internal_port = 3000
+  protocol = 'tcp'
+
+  [[services.ports]]
+    port = 80
+    handlers = ['http']
+    force_https = true
+
+  [[services.ports]]
+    port = 443
+    handlers = ['tls', 'http']
+
+  [[services.tcp_checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '30s'
+
+# --- mcp-proxy sidecar (Remote MCP for Claude Managed Agents) --------------
+# Endpoints (named-server-config keys become URL path segments):
+#   https://<app>.fly.dev:8096/servers/<name>/mcp   (Streamable HTTP)
+#   https://<app>.fly.dev:8096/servers/<name>/sse   (SSE)
+[[services]]
+  internal_port = 8096
+  protocol = 'tcp'
+
+  [[services.ports]]
+    port = 8096
+    handlers = ['tls', 'http']
+
+  [[services.tcp_checks]]
     interval = '30s'
     timeout = '5s'
     grace_period = '30s'

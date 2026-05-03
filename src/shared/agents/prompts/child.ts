@@ -12,6 +12,13 @@ export type BuildChildPromptArgs = {
   task: DecomposedTask;
   commitStyle: string;
   priorCommits?: Array<{ sha: string; message: string }>;
+  /**
+   * Repository-specific instructions appended to the runtime prompt as an
+   * additional section. The body is passed through verbatim. When omitted or
+   * blank, no extra section is rendered (preserving byte-identical output for
+   * repositories without an override).
+   */
+  repoPrompt?: string | null;
 };
 
 export function buildChildPrompt({
@@ -23,6 +30,7 @@ export function buildChildPrompt({
   task,
   commitStyle,
   priorCommits,
+  repoPrompt,
 }: BuildChildPromptArgs): string {
   const acList = task.acceptanceCriteria.map((ac) => `- ${ac}`).join("\n");
 
@@ -34,7 +42,7 @@ ${priorCommits.map((c) => `${c.sha}: ${c.message}`).join("\n")}
 `
       : "";
 
-  return `You are a task-implementer. Your task: ${task.title} — ${task.description}
+  const basePrompt = `You are a task-implementer. Your task: ${task.title} — ${task.description}
 
 Repository: ${repoOwner}/${repoName}
 
@@ -87,4 +95,24 @@ Critical guardrails:
 - MUST NOT push to any branch other than ${branch}
 - MUST NOT run destructive commands (e.g., rm -rf /)
 `;
+
+  const repoSection = renderRepoPromptSection(repoOwner, repoName, repoPrompt);
+  return repoSection === null ? basePrompt : `${basePrompt}\n${repoSection}\n`;
+}
+
+function renderRepoPromptSection(
+  repoOwner: string,
+  repoName: string,
+  repoPrompt: string | null | undefined,
+): string | null {
+  if (typeof repoPrompt !== "string") {
+    return null;
+  }
+
+  const trimmed = repoPrompt.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  return `\n## Repository-specific instructions for ${repoOwner}/${repoName}\n\n${trimmed}\n\nThese instructions take precedence over generic guidance when they conflict, but you MUST still respect the critical guardrails above.`;
 }

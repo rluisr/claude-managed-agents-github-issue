@@ -13,7 +13,16 @@ import {
   type PromptDetailPageProps,
   type PromptRevisionView,
 } from "@/features/dashboard/pages/prompt-detail";
-import { type PromptListEntry, PromptsListPage } from "@/features/dashboard/pages/prompts-list";
+import {
+  type PromptListEntry,
+  PromptsListPage,
+  type RepoPromptOverrideEntry,
+} from "@/features/dashboard/pages/prompts-list";
+import { RepoDetailPage, type RepoPromptSlot } from "@/features/dashboard/pages/repo-detail";
+import {
+  RepoPromptDetailPage,
+  type RepoPromptDetailPageProps,
+} from "@/features/dashboard/pages/repo-prompt-detail";
 import { RepositoriesPage } from "@/features/dashboard/pages/repositories";
 import { RunDetailPage, type RunDetailPageProps } from "@/features/dashboard/pages/run-detail";
 import { RunLivePage, type RunLivePageProps } from "@/features/dashboard/pages/run-live";
@@ -27,6 +36,10 @@ import {
   PromptKeySchema,
   type PromptRevisionRow,
   PromptSaveInputSchema,
+  type RepoPromptAgent,
+  RepoPromptAgentSchema,
+  RepoPromptSaveInputSchema,
+  RepoSlugSchema,
 } from "@/shared/persistence/schemas";
 import { getDefaultPrompt } from "@/shared/prompts/defaults";
 import type { SessionClient } from "@/shared/session";
@@ -56,7 +69,17 @@ const PROMPT_KEYS: PromptKey[] = [
   "parent.runtime",
   "child.runtime",
 ];
+const REPO_PROMPT_AGENTS: RepoPromptAgent[] = ["parent", "child"];
 const RestoreRevisionIdSchema = z.coerce.number().int().positive();
+
+function repoSlugFromParams(owner: string, name: string): string | null {
+  const parsed = RepoSlugSchema.safeParse(`${owner}/${name}`);
+  return parsed.success ? parsed.data : null;
+}
+
+function repoPromptAgentLabel(agent: RepoPromptAgent): string {
+  return agent === "parent" ? "parent" : "child";
+}
 
 type PromptWithBody = {
   body: string;
@@ -292,7 +315,214 @@ export function dashboardWebRoutes(opts: CreateAppOptions): Hono {
   app.get("/repos/:owner/:name", (c) => {
     const owner = c.req.param("owner");
     const name = c.req.param("name");
-    const repo = `${owner}/${name}`;
+    const repo = repoSlugFromParams(owner, name);
+    if (repo === null) {
+      return c.html(
+        renderDocument(NotFoundPage({ message: `repository "${owner}/${name}" not found` })),
+        404,
+      );
+    }
+
+    const enrichedRuns = db
+      .listRuns({ limit: RUN_LIST_LIMIT, repo })
+      .map((run) => runsPageSummary(db, run));
+
+    const slots: RepoPromptSlot[] = REPO_PROMPT_AGENTS.map((agent) => {
+      const row = db.getRepoPrompt(repo, agent);
+      return {
+        agent,
+        configured: row !== null,
+        currentRevisionId: row?.currentRevisionId ?? null,
+        revisionCount: row !== null ? db.getRepoPromptRevisions(repo, agent).length : 0,
+        updatedAt: row?.updatedAt ?? null,
+      };
+    });
+
+    return c.html(
+      renderDocument(
+        RepoDetailPage({
+          repo,
+          repoPromptSlots: slots,
+          runs: enrichedRuns,
+        }),
+      ),
+    );
+  });
+
+  app.get("/repos/:owner/:name/prompts/:agent", (c) => {
+    c.header("Cache-Control", "no-store");
+    const owner = c.req.param("owner");
+    const name = c.req.param("name");
+    const repo = repoSlugFromParams(owner, name);
+    if (repo === null) {
+      return c.html(
+        renderDocument(NotFoundPage({ message: `repository "${owner}/${name}" not found` })),
+        404,
+      );
+    }
+
+    const parsedAgent = RepoPromptAgentSchema.safeParse(c.req.param("agent"));
+    if (!parsedAgent.success) {
+      return c.html(
+        renderDocument(BadRequestPage({ message: "agent must be 'parent' or 'child'" })),
+        400,
+      );
+    }
+
+    const agent = parsedAgent.data;
+    const promptRow = db.getRepoPrompt(repo, agent);
+    const globalKey: RepoPromptDetailPageProps["globalPromptKey"] = `${agent}.system`;
+    const globalPrompt = getPromptWithFallback(db, globalKey);
+    const revisions = promptRow !== null ? db.getRepoPromptRevisions(repo, agent) : [];
+    const prevRevisionRow = revisions[1];
+    const props: RepoPromptDetailPageProps = {
+      agent,
+      agentLabel: repoPromptAgentLabel(agent),
+      body: promptRow?.body ?? "",
+      configured: promptRow !== null,
+      currentRevisionId: promptRow?.currentRevisionId ?? null,
+      globalPromptBody: globalPrompt.body,
+      globalPromptKey: globalKey,
+      noChangeNotice: getNoChangeNotice(c.req.query("no_change"), c.req.query("already_current")),
+      prevRevision:
+        prevRevisionRow === undefined
+          ? undefined
+          : {
+              body: prevRevisionRow.body,
+              createdAt: prevRevisionRow.createdAt,
+              id: prevRevisionRow.id,
+              source: prevRevisionRow.source,
+            },
+      removedNotice: c.req.query("removed") === "1",
+      repo,
+      revisions: revisions.map((rev) => ({
+        body: rev.body,
+        createdAt: rev.createdAt,
+        id: rev.id,
+        source: rev.source,
+      })),
+    };
+    return c.html(renderDocument(RepoPromptDetailPage(props)));
+  });
+
+  app.post("/repos/:owner/:name/prompts/:agent", async (c) => {
+    c.header("Cache-Control", "no-store");
+    const owner = c.req.param("owner");
+    const name = c.req.param("name");
+    const repo = repoSlugFromParams(owner, name);
+    if (repo === null) {
+      return c.html(
+        renderDocument(NotFoundPage({ message: `repository "${owner}/${name}" not found` })),
+        404,
+      );
+    }
+
+    const parsedAgent = RepoPromptAgentSchema.safeParse(c.req.param("agent"));
+    if (!parsedAgent.success) {
+      return c.html(
+        renderDocument(BadRequestPage({ message: "agent must be 'parent' or 'child'" })),
+        400,
+      );
+    }
+
+    const form = await c.req.parseBody();
+    const rawBody = form.body;
+    if (typeof rawBody !== "string") {
+      return c.html(renderDocument(BadRequestPage({ message: "prompt body is required" })), 400);
+    }
+
+    const normalizedBody = rawBody.replace(/\r\n/g, "\n");
+    const parsedInput = RepoPromptSaveInputSchema.safeParse({ body: normalizedBody });
+    if (!parsedInput.success || normalizedBody.trim().length < 10) {
+      return c.html(renderDocument(BadRequestPage({ message: "invalid prompt body" })), 400);
+    }
+
+    const result = db.saveRepoPromptRevision({
+      agent: parsedAgent.data,
+      body: normalizedBody,
+      repo,
+      source: "edit",
+    });
+    const base = `/repos/${owner}/${name}/prompts/${parsedAgent.data}`;
+    return c.redirect(result.isNoChange ? `${base}?no_change=1` : base, 302);
+  });
+
+  app.post("/repos/:owner/:name/prompts/:agent/restore", async (c) => {
+    c.header("Cache-Control", "no-store");
+    const owner = c.req.param("owner");
+    const name = c.req.param("name");
+    const repo = repoSlugFromParams(owner, name);
+    if (repo === null) {
+      return c.html(
+        renderDocument(NotFoundPage({ message: `repository "${owner}/${name}" not found` })),
+        404,
+      );
+    }
+
+    const parsedAgent = RepoPromptAgentSchema.safeParse(c.req.param("agent"));
+    if (!parsedAgent.success) {
+      return c.html(
+        renderDocument(BadRequestPage({ message: "agent must be 'parent' or 'child'" })),
+        400,
+      );
+    }
+
+    const form = await c.req.parseBody();
+    const parsedRevisionId = RestoreRevisionIdSchema.safeParse(form.revision_id);
+    if (!parsedRevisionId.success) {
+      return c.html(
+        renderDocument(BadRequestPage({ message: "valid revision_id is required" })),
+        400,
+      );
+    }
+
+    const revision = db.getRepoPromptRevision(repo, parsedAgent.data, parsedRevisionId.data);
+    if (revision === null) {
+      return c.html(
+        renderDocument(NotFoundPage({ message: `revision ${parsedRevisionId.data} not found` })),
+        404,
+      );
+    }
+
+    const result = db.restoreRepoPromptToRevision(repo, parsedAgent.data, parsedRevisionId.data);
+    const base = `/repos/${owner}/${name}/prompts/${parsedAgent.data}`;
+    return c.redirect(result.alreadyCurrent ? `${base}?already_current=1` : base, 302);
+  });
+
+  app.post("/repos/:owner/:name/prompts/:agent/delete", async (c) => {
+    c.header("Cache-Control", "no-store");
+    const owner = c.req.param("owner");
+    const name = c.req.param("name");
+    const repo = repoSlugFromParams(owner, name);
+    if (repo === null) {
+      return c.html(
+        renderDocument(NotFoundPage({ message: `repository "${owner}/${name}" not found` })),
+        404,
+      );
+    }
+
+    const parsedAgent = RepoPromptAgentSchema.safeParse(c.req.param("agent"));
+    if (!parsedAgent.success) {
+      return c.html(
+        renderDocument(BadRequestPage({ message: "agent must be 'parent' or 'child'" })),
+        400,
+      );
+    }
+
+    db.deleteRepoPrompt(repo, parsedAgent.data);
+    return c.redirect(`/repos/${owner}/${name}/prompts/${parsedAgent.data}?removed=1`, 302);
+  });
+
+  app.get("/repos/:owner/:name/runs", (c) => {
+    const owner = c.req.param("owner");
+    const name = c.req.param("name");
+    const repo = repoSlugFromParams(owner, name);
+    if (repo === null) {
+      return c.html(
+        renderDocument(NotFoundPage({ message: `repository "${owner}/${name}" not found` })),
+        404,
+      );
+    }
     const enrichedRuns = db
       .listRuns({ limit: RUN_LIST_LIMIT, repo })
       .map((run) => runsPageSummary(db, run));
@@ -312,7 +542,13 @@ export function dashboardWebRoutes(opts: CreateAppOptions): Hono {
         updatedAt: prompt.currentRevisionId > 0 ? prompt.updatedAt : null,
       };
     });
-    const jsx = PromptsListPage({ prompts });
+    const repoOverrides: RepoPromptOverrideEntry[] = db.listRepoPromptOverrides().map((row) => ({
+      agent: row.agent,
+      repo: row.repo,
+      revisionCount: row.revisionCount,
+      updatedAt: row.updatedAt,
+    }));
+    const jsx = PromptsListPage({ prompts, repoOverrides });
     return c.html(renderDocument(jsx));
   });
 

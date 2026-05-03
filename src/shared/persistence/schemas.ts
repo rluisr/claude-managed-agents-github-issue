@@ -99,6 +99,74 @@ export const RestoreInputSchema = z.object({
 });
 export type RestoreInput = z.infer<typeof RestoreInputSchema>;
 
+// --- Per-repository prompt overrides ---
+
+// `owner/name` slug, validated server-side wherever it is parsed.
+const RepoSlugSchema = z
+  .string()
+  .min(3)
+  .max(140)
+  .regex(
+    /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/,
+    {
+      message: "repo must match owner/name",
+    },
+  );
+export type RepoSlug = z.infer<typeof RepoSlugSchema>;
+export { RepoSlugSchema };
+
+// Repo-level prompts target either parent or child agent only.
+// Runtime templates are not configurable per repo.
+export const RepoPromptAgentSchema = z.enum(["parent", "child"]);
+export type RepoPromptAgent = z.infer<typeof RepoPromptAgentSchema>;
+
+// Sources for repo prompt revisions: only edits and restores.
+// (Seeding does not apply because there is no default body.)
+export const RepoPromptRevisionSourceSchema = z.enum(["edit", "restore"]);
+export type RepoPromptRevisionSource = z.infer<typeof RepoPromptRevisionSourceSchema>;
+
+export const RepoPromptRowSchema = z.object({
+  repo: RepoSlugSchema,
+  agent: RepoPromptAgentSchema,
+  currentRevisionId: PositiveIntegerSchema,
+  updatedAt: NonEmptyStringSchema,
+});
+export type RepoPromptRow = z.infer<typeof RepoPromptRowSchema>;
+
+export const RepoPromptRevisionRowSchema = z.object({
+  id: PositiveIntegerSchema,
+  repo: RepoSlugSchema,
+  agent: RepoPromptAgentSchema,
+  body: NonEmptyStringSchema,
+  createdAt: NonEmptyStringSchema,
+  bodySha256: NonEmptyStringSchema,
+  source: RepoPromptRevisionSourceSchema,
+});
+export type RepoPromptRevisionRow = z.infer<typeof RepoPromptRevisionRowSchema>;
+
+// Same length window as the global prompt save schema for consistency.
+export const RepoPromptSaveInputSchema = z.object({
+  body: z
+    .string()
+    .min(10)
+    .max(102400)
+    .refine((s) => s.trim().length > 0, { message: "body must contain non-whitespace" }),
+});
+export type RepoPromptSaveInput = z.infer<typeof RepoPromptSaveInputSchema>;
+
+export const RepoPromptRestoreInputSchema = z.object({
+  repo: RepoSlugSchema,
+  agent: RepoPromptAgentSchema,
+  revisionId: PositiveIntegerSchema,
+});
+export type RepoPromptRestoreInput = z.infer<typeof RepoPromptRestoreInputSchema>;
+
+export const RepoPromptIdentifierSchema = z.object({
+  repo: RepoSlugSchema,
+  agent: RepoPromptAgentSchema,
+});
+export type RepoPromptIdentifier = z.infer<typeof RepoPromptIdentifierSchema>;
+
 // --- Run-level types (T4) ---
 export const RunStatusSchema = z.enum(["queued", "running", "completed", "failed", "aborted"]);
 export type RunStatus = z.infer<typeof RunStatusSchema>;

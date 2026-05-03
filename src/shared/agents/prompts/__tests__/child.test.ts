@@ -87,4 +87,29 @@ describe("buildChildPrompt", () => {
     expect(prompt).toContain("filesChanged");
     expect(prompt).toContain("testOutput");
   });
+
+  it("should not include any repository-specific section when no override is provided", () => {
+    const prompt = buildChildPrompt(defaultArgs);
+    expect(prompt).not.toContain("Repository-specific instructions");
+  });
+
+  it("should append repo-specific instructions verbatim when an override is provided", () => {
+    const repoPrompt = "Always update CHANGELOG.md when changing public API.";
+    const prompt = buildChildPrompt({ ...defaultArgs, repoPrompt });
+
+    expect(prompt).toContain(
+      `## Repository-specific instructions for ${defaultArgs.repoOwner}/${defaultArgs.repoName}`,
+    );
+    expect(prompt).toContain(repoPrompt);
+    expect(prompt).toContain("These instructions take precedence over generic guidance");
+  });
+
+  it("treats blank or whitespace-only override as absent", () => {
+    expect(buildChildPrompt({ ...defaultArgs, repoPrompt: "" })).toBe(
+      buildChildPrompt(defaultArgs),
+    );
+    expect(buildChildPrompt({ ...defaultArgs, repoPrompt: null })).toBe(
+      buildChildPrompt(defaultArgs),
+    );
+  });
 });

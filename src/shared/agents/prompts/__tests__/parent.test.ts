@@ -86,4 +86,32 @@ describe("buildParentPrompt", () => {
     const prompt = buildParentPrompt(defaultParams);
     expect(prompt.length < 32000).toBe(true);
   });
+
+  it("should not include any repository-specific section when no override is provided", () => {
+    const prompt = buildParentPrompt(defaultParams);
+    expect(prompt).not.toContain("Repository-specific instructions");
+  });
+
+  it("should append repo-specific instructions verbatim when an override is provided", () => {
+    const repoPrompt = "Always run `bun run lint` after sub-task implementation.";
+    const prompt = buildParentPrompt({ ...defaultParams, repoPrompt });
+
+    expect(prompt).toContain(
+      `## Repository-specific instructions for ${defaultParams.repoOwner}/${defaultParams.repoName}`,
+    );
+    expect(prompt).toContain(repoPrompt);
+    expect(prompt).toContain("These instructions take precedence over generic guidance");
+  });
+
+  it("treats blank or whitespace-only override as absent", () => {
+    expect(buildParentPrompt({ ...defaultParams, repoPrompt: "" })).toBe(
+      buildParentPrompt(defaultParams),
+    );
+    expect(buildParentPrompt({ ...defaultParams, repoPrompt: "   \n\t" })).toBe(
+      buildParentPrompt(defaultParams),
+    );
+    expect(buildParentPrompt({ ...defaultParams, repoPrompt: null })).toBe(
+      buildParentPrompt(defaultParams),
+    );
+  });
 });

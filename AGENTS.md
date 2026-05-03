@@ -67,6 +67,12 @@ index.ts                    # HTTP サーバーのエントリポイント (bun 
 - **Agent registry**: エージェント定義のハッシュを比較し、変更時のみ API に update を送る。
 - **Runtime state**: `.github-issue-agent/dashboard.db` (SQLite) に実行状態を永続化。
 
+## UI/UX 実装
+
+- **`src/features/dashboard/` 配下の WebUI を実装・修正する際は必ず `frontend-design` スキルをロードする**。新規ページ・コンポーネント追加、レイアウト変更、Tailwind スタイル調整、視覚的なポリッシュ、レスポンシブ対応など、ユーザーが目にする部分の変更が対象
+- スキルロード後は `@designer` サブエージェントへの委任を優先検討する (UI/UX 品質が重要な場合)
+- 純粋なバックエンドロジック (API ハンドラ, DB 操作, エージェント実行) のみを変更する場合は対象外
+
 ## テスト
 
 - テストは `__tests__/` ディレクトリにソースと colocate

@@ -8,6 +8,10 @@ import type {
   PromptRevisionRow,
   PromptRevisionSource,
   PromptRow,
+  RepoPromptAgent,
+  RepoPromptRevisionRow,
+  RepoPromptRevisionSource,
+  RepoPromptRow,
 } from "@/shared/persistence/schemas";
 import {
   ChildTaskResultSchema,
@@ -17,6 +21,14 @@ import {
   PromptRevisionSourceSchema,
   PromptRowSchema,
   PromptSaveInputSchema,
+  RepoPromptAgentSchema,
+  RepoPromptIdentifierSchema,
+  RepoPromptRestoreInputSchema,
+  RepoPromptRevisionRowSchema,
+  RepoPromptRevisionSourceSchema,
+  RepoPromptRowSchema,
+  RepoPromptSaveInputSchema,
+  RepoSlugSchema,
   RestoreInputSchema,
   RunEventKindSchema,
   RunEventSchema,
@@ -129,6 +141,22 @@ const SCHEMA_SQL = `
     body_sha256 TEXT NOT NULL,
     source TEXT NOT NULL CHECK(source IN ('seed','edit','restore'))
   );
+  CREATE TABLE IF NOT EXISTS repo_prompts (
+    repo TEXT NOT NULL,
+    agent TEXT NOT NULL CHECK(agent IN ('parent','child')),
+    current_revision_id INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (repo, agent)
+  );
+  CREATE TABLE IF NOT EXISTS repo_prompt_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo TEXT NOT NULL,
+    agent TEXT NOT NULL CHECK(agent IN ('parent','child')),
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    source TEXT NOT NULL CHECK(source IN ('edit','restore'))
+  );
   CREATE INDEX IF NOT EXISTS idx_runs_repo ON runs(repo);
   CREATE INDEX IF NOT EXISTS idx_sessions_run ON sessions(run_id);
   CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, id);
@@ -136,6 +164,11 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_ctr_run ON child_task_results(run_id);
   CREATE INDEX IF NOT EXISTS idx_prompt_revisions_key ON prompt_revisions(prompt_key, id DESC);
   CREATE INDEX IF NOT EXISTS idx_prompt_revisions_sha ON prompt_revisions(prompt_key, body_sha256);
+  CREATE INDEX IF NOT EXISTS idx_repo_prompt_revisions_target
+    ON repo_prompt_revisions(repo, agent, id DESC);
+  CREATE INDEX IF NOT EXISTS idx_repo_prompt_revisions_sha
+    ON repo_prompt_revisions(repo, agent, body_sha256);
+  CREATE INDEX IF NOT EXISTS idx_repo_prompts_repo ON repo_prompts(repo);
 `;
 
 type RunRow = {
@@ -264,6 +297,50 @@ type PromptSeedResult = {
   seeded: boolean;
 };
 
+type RepoPromptWithBodyRow = RepoPromptRow & {
+  body: string;
+};
+
+type RepoPromptCurrentRevisionRow = RepoPromptRevisionRow & {
+  currentRevisionId: number;
+  updatedAt: string;
+};
+
+type RepoPromptSaveTransactionInput = {
+  agent: RepoPromptAgent;
+  allowDuplicateBody: boolean;
+  body: string;
+  bodySha256: string;
+  now: string;
+  repo: string;
+  source: RepoPromptRevisionSource;
+};
+
+type RepoPromptSaveResult = {
+  isNoChange: boolean;
+  revisionId: number;
+};
+
+type RepoPromptRestoreTransactionInput = {
+  agent: RepoPromptAgent;
+  now: string;
+  repo: string;
+  revisionId: number;
+};
+
+type RepoPromptRestoreResult = {
+  alreadyCurrent: boolean;
+  newRevisionId: number;
+};
+
+type RepoPromptOverrideSummaryRow = {
+  repo: string;
+  agent: RepoPromptAgent;
+  currentRevisionId: number;
+  updatedAt: string;
+  revisionCount: number;
+};
+
 type PreparedStatements = {
   deleteSubIssuesByRun: StatementLike<unknown, [string]>;
   getChildTaskResultsByRun: StatementLike<ChildTaskResultRow, [string]>;
@@ -316,6 +393,28 @@ type PreparedStatements = {
   setRunPhase: StatementLike<unknown, [RunPhase | null, string]>;
   setRunStatus: StatementLike<unknown, [RunStatus, string]>;
   upsertPrompt: StatementLike<unknown, [PromptKey, number, string]>;
+  // Repo prompts
+  deleteRepoPromptByKey: StatementLike<unknown, [string, RepoPromptAgent]>;
+  deleteRepoPromptRevisionsByKey: StatementLike<unknown, [string, RepoPromptAgent]>;
+  getRepoPromptByKey: StatementLike<RepoPromptWithBodyRow, [string, RepoPromptAgent]>;
+  getRepoPromptCurrentRevisionByKey: StatementLike<
+    RepoPromptCurrentRevisionRow,
+    [string, RepoPromptAgent]
+  >;
+  getRepoPromptRevisionByKeyAndId: StatementLike<
+    RepoPromptRevisionRow,
+    [string, RepoPromptAgent, number]
+  >;
+  getRepoPromptRevisionsByKey: StatementLike<RepoPromptRevisionRow, [string, RepoPromptAgent]>;
+  getRepoPromptRowByKey: StatementLike<RepoPromptRow, [string, RepoPromptAgent]>;
+  insertRepoPrompt: StatementLike<unknown, [string, RepoPromptAgent, number, string]>;
+  insertRepoPromptRevision: StatementLike<
+    { id: number },
+    [string, RepoPromptAgent, string, string, string, RepoPromptRevisionSource]
+  >;
+  listRepoPromptOverrides: StatementLike<RepoPromptOverrideSummaryRow, []>;
+  listRepoPromptOverridesByRepo: StatementLike<RepoPromptOverrideSummaryRow, [string]>;
+  upsertRepoPrompt: StatementLike<unknown, [string, RepoPromptAgent, number, string]>;
 };
 
 type PreparedRuntime = {
@@ -327,6 +426,18 @@ type PreparedRuntime = {
   savePromptRevisionTransaction: (
     input: PromptSaveTransactionInput,
     setResult: (result: PromptSaveResult) => void,
+  ) => void;
+  saveRepoPromptRevisionTransaction: (
+    input: RepoPromptSaveTransactionInput,
+    setResult: (result: RepoPromptSaveResult) => void,
+  ) => void;
+  restoreRepoPromptToRevisionTransaction: (
+    input: RepoPromptRestoreTransactionInput,
+    setResult: (result: RepoPromptRestoreResult) => void,
+  ) => void;
+  deleteRepoPromptTransaction: (
+    input: { agent: RepoPromptAgent; repo: string },
+    setResult: (result: { deleted: boolean }) => void,
   ) => void;
   seedPromptIfMissingTransaction: (
     input: PromptSeedTransactionInput,
@@ -430,6 +541,45 @@ function parseInsertedPromptRevisionId(row: { id: number } | null | undefined): 
   }
 
   return PromptRevisionRowSchema.shape.id.parse(row.id);
+}
+
+function parseInsertedRepoPromptRevisionId(row: { id: number } | null | undefined): number {
+  if (row == null) {
+    throw new Error("Failed to insert repo prompt revision");
+  }
+
+  return RepoPromptRevisionRowSchema.shape.id.parse(row.id);
+}
+
+function parseRepoPromptWithBody(row: RepoPromptWithBodyRow): {
+  agent: RepoPromptAgent;
+  body: string;
+  currentRevisionId: number;
+  repo: string;
+  updatedAt: string;
+} {
+  const promptRow = RepoPromptRowSchema.parse(row);
+
+  return {
+    agent: promptRow.agent,
+    body: RepoPromptRevisionRowSchema.shape.body.parse(row.body),
+    currentRevisionId: promptRow.currentRevisionId,
+    repo: promptRow.repo,
+    updatedAt: promptRow.updatedAt,
+  };
+}
+
+function parseRepoPromptCurrentRevision(
+  row: RepoPromptCurrentRevisionRow,
+): RepoPromptCurrentRevisionRow {
+  const revisionRow = RepoPromptRevisionRowSchema.parse(row);
+  const promptRow = RepoPromptRowSchema.parse(row);
+
+  return {
+    ...revisionRow,
+    currentRevisionId: promptRow.currentRevisionId,
+    updatedAt: promptRow.updatedAt,
+  };
 }
 
 function normalizeListRunsLimit(limit: number | undefined): number {
@@ -888,6 +1038,144 @@ export function createDbModule(dbPath?: string, overrides: Partial<DbModuleDepen
            current_revision_id = excluded.current_revision_id,
            updated_at = excluded.updated_at`,
       ),
+      deleteRepoPromptByKey: db.query("DELETE FROM repo_prompts WHERE repo = ?1 AND agent = ?2"),
+      deleteRepoPromptRevisionsByKey: db.query(
+        "DELETE FROM repo_prompt_revisions WHERE repo = ?1 AND agent = ?2",
+      ),
+      getRepoPromptByKey: db.query<RepoPromptWithBodyRow, [string, RepoPromptAgent]>(
+        `SELECT
+           p.repo AS repo,
+           p.agent AS agent,
+           p.current_revision_id AS currentRevisionId,
+           r.body,
+           p.updated_at AS updatedAt
+         FROM repo_prompts p
+         JOIN repo_prompt_revisions r
+           ON r.id = p.current_revision_id
+          AND r.repo = p.repo
+          AND r.agent = p.agent
+         WHERE p.repo = ?1
+           AND p.agent = ?2`,
+      ),
+      getRepoPromptCurrentRevisionByKey: db.query<
+        RepoPromptCurrentRevisionRow,
+        [string, RepoPromptAgent]
+      >(
+        `SELECT
+           r.id,
+           r.repo,
+           r.agent,
+           r.body,
+           r.created_at AS createdAt,
+           r.body_sha256 AS bodySha256,
+           r.source,
+           p.current_revision_id AS currentRevisionId,
+           p.updated_at AS updatedAt
+         FROM repo_prompts p
+         JOIN repo_prompt_revisions r
+           ON r.id = p.current_revision_id
+          AND r.repo = p.repo
+          AND r.agent = p.agent
+         WHERE p.repo = ?1
+           AND p.agent = ?2`,
+      ),
+      getRepoPromptRevisionByKeyAndId: db.query<
+        RepoPromptRevisionRow,
+        [string, RepoPromptAgent, number]
+      >(
+        `SELECT
+           id,
+           repo,
+           agent,
+           body,
+           created_at AS createdAt,
+           body_sha256 AS bodySha256,
+           source
+         FROM repo_prompt_revisions
+         WHERE repo = ?1
+           AND agent = ?2
+           AND id = ?3`,
+      ),
+      getRepoPromptRevisionsByKey: db.query<RepoPromptRevisionRow, [string, RepoPromptAgent]>(
+        `SELECT
+           id,
+           repo,
+           agent,
+           body,
+           created_at AS createdAt,
+           body_sha256 AS bodySha256,
+           source
+         FROM repo_prompt_revisions
+         WHERE repo = ?1
+           AND agent = ?2
+         ORDER BY id DESC`,
+      ),
+      getRepoPromptRowByKey: db.query<RepoPromptRow, [string, RepoPromptAgent]>(
+        `SELECT
+           repo,
+           agent,
+           current_revision_id AS currentRevisionId,
+           updated_at AS updatedAt
+         FROM repo_prompts
+         WHERE repo = ?1
+           AND agent = ?2`,
+      ),
+      insertRepoPrompt: db.query(
+        `INSERT INTO repo_prompts (
+           repo,
+           agent,
+           current_revision_id,
+           updated_at
+         ) VALUES (?1, ?2, ?3, ?4)`,
+      ),
+      insertRepoPromptRevision: db.query<
+        { id: number },
+        [string, RepoPromptAgent, string, string, string, RepoPromptRevisionSource]
+      >(
+        `INSERT INTO repo_prompt_revisions (
+           repo,
+           agent,
+           body,
+           created_at,
+           body_sha256,
+           source
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         RETURNING id`,
+      ),
+      listRepoPromptOverrides: db.query<RepoPromptOverrideSummaryRow>(
+        `SELECT
+           p.repo AS repo,
+           p.agent AS agent,
+           p.current_revision_id AS currentRevisionId,
+           p.updated_at AS updatedAt,
+           (SELECT COUNT(*) FROM repo_prompt_revisions r
+              WHERE r.repo = p.repo AND r.agent = p.agent) AS revisionCount
+         FROM repo_prompts p
+         ORDER BY p.updated_at DESC`,
+      ),
+      listRepoPromptOverridesByRepo: db.query<RepoPromptOverrideSummaryRow, [string]>(
+        `SELECT
+           p.repo AS repo,
+           p.agent AS agent,
+           p.current_revision_id AS currentRevisionId,
+           p.updated_at AS updatedAt,
+           (SELECT COUNT(*) FROM repo_prompt_revisions r
+              WHERE r.repo = p.repo AND r.agent = p.agent) AS revisionCount
+         FROM repo_prompts p
+         WHERE p.repo = ?1
+         ORDER BY p.agent ASC`,
+      ),
+      upsertRepoPrompt: db.query(
+        `INSERT INTO repo_prompts (
+           repo,
+           agent,
+           current_revision_id,
+           updated_at
+         ) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(repo, agent) DO UPDATE SET
+           current_revision_id = excluded.current_revision_id,
+           updated_at = excluded.updated_at`,
+      ),
     };
     const replaceRunAndSubIssues = db.transaction((run: RunState) => {
       statements.insertRun.run(
@@ -1014,10 +1302,138 @@ export function createDbModule(dbPath?: string, overrides: Partial<DbModuleDepen
       },
     );
 
+    function insertRepoPromptRevisionRow(input: {
+      agent: RepoPromptAgent;
+      body: string;
+      bodySha256: string;
+      now: string;
+      repo: string;
+      source: RepoPromptRevisionSource;
+    }): number {
+      return parseInsertedRepoPromptRevisionId(
+        statements.insertRepoPromptRevision.get(
+          input.repo,
+          input.agent,
+          input.body,
+          input.now,
+          input.bodySha256,
+          input.source,
+        ),
+      );
+    }
+
+    function insertRepoPromptRevisionAndUpsert(input: {
+      agent: RepoPromptAgent;
+      body: string;
+      bodySha256: string;
+      now: string;
+      repo: string;
+      source: RepoPromptRevisionSource;
+    }): number {
+      const revisionId = insertRepoPromptRevisionRow(input);
+      statements.upsertRepoPrompt.run(input.repo, input.agent, revisionId, input.now);
+      return revisionId;
+    }
+
+    const saveRepoPromptRevisionTransaction = db.transaction(
+      (
+        input: RepoPromptSaveTransactionInput,
+        setResult: (result: RepoPromptSaveResult) => void,
+      ) => {
+        const currentRow = statements.getRepoPromptCurrentRevisionByKey.get(
+          input.repo,
+          input.agent,
+        );
+
+        if (currentRow != null) {
+          const currentRevision = parseRepoPromptCurrentRevision(currentRow);
+
+          if (!input.allowDuplicateBody && currentRevision.bodySha256 === input.bodySha256) {
+            setResult({
+              isNoChange: true,
+              revisionId: currentRevision.currentRevisionId,
+            });
+            return;
+          }
+        }
+
+        const revisionId = insertRepoPromptRevisionAndUpsert(input);
+        setResult({ isNoChange: false, revisionId });
+      },
+    );
+
+    const restoreRepoPromptToRevisionTransaction = db.transaction(
+      (
+        input: RepoPromptRestoreTransactionInput,
+        setResult: (result: RepoPromptRestoreResult) => void,
+      ) => {
+        const targetRow = statements.getRepoPromptRevisionByKeyAndId.get(
+          input.repo,
+          input.agent,
+          input.revisionId,
+        );
+
+        if (targetRow == null) {
+          throw new Error(
+            `Repo prompt revision ${input.revisionId} not found for ${input.repo}/${input.agent}`,
+          );
+        }
+
+        const targetRevision = RepoPromptRevisionRowSchema.parse(targetRow);
+        const currentRow = statements.getRepoPromptCurrentRevisionByKey.get(
+          input.repo,
+          input.agent,
+        );
+
+        if (currentRow != null) {
+          const currentRevision = parseRepoPromptCurrentRevision(currentRow);
+
+          if (targetRevision.body === currentRevision.body) {
+            setResult({
+              alreadyCurrent: true,
+              newRevisionId: currentRevision.currentRevisionId,
+            });
+            return;
+          }
+        }
+
+        const newRevisionId = insertRepoPromptRevisionAndUpsert({
+          agent: input.agent,
+          body: targetRevision.body,
+          bodySha256: hashPromptBody(targetRevision.body),
+          now: input.now,
+          repo: input.repo,
+          source: RepoPromptRevisionSourceSchema.parse("restore"),
+        });
+        setResult({ alreadyCurrent: false, newRevisionId });
+      },
+    );
+
+    const deleteRepoPromptTransaction = db.transaction(
+      (
+        input: { agent: RepoPromptAgent; repo: string },
+        setResult: (result: { deleted: boolean }) => void,
+      ) => {
+        const promptRow = statements.getRepoPromptRowByKey.get(input.repo, input.agent);
+
+        if (promptRow == null) {
+          setResult({ deleted: false });
+          return;
+        }
+
+        statements.deleteRepoPromptByKey.run(input.repo, input.agent);
+        statements.deleteRepoPromptRevisionsByKey.run(input.repo, input.agent);
+        setResult({ deleted: true });
+      },
+    );
+
     runtime = {
       replaceRunAndSubIssues,
       restorePromptToRevisionTransaction,
+      restoreRepoPromptToRevisionTransaction,
+      saveRepoPromptRevisionTransaction,
       savePromptRevisionTransaction,
+      deleteRepoPromptTransaction,
       seedPromptIfMissingTransaction,
       statements,
     };
@@ -1381,16 +1797,160 @@ export function createDbModule(dbPath?: string, overrides: Partial<DbModuleDepen
     return result;
   }
 
+  // ---- Per-repository prompt overrides ----
+
+  function getRepoPrompt(
+    repo: string,
+    agent: RepoPromptAgent,
+  ): {
+    agent: RepoPromptAgent;
+    body: string;
+    currentRevisionId: number;
+    repo: string;
+    updatedAt: string;
+  } | null {
+    const parsedRepo = RepoSlugSchema.parse(repo);
+    const parsedAgent = RepoPromptAgentSchema.parse(agent);
+    const row = getRuntime().statements.getRepoPromptByKey.get(parsedRepo, parsedAgent);
+    return row == null ? null : parseRepoPromptWithBody(row);
+  }
+
+  function getRepoPromptRevisions(repo: string, agent: RepoPromptAgent): RepoPromptRevisionRow[] {
+    const parsedRepo = RepoSlugSchema.parse(repo);
+    const parsedAgent = RepoPromptAgentSchema.parse(agent);
+    return getRuntime()
+      .statements.getRepoPromptRevisionsByKey.all(parsedRepo, parsedAgent)
+      .map((row) => RepoPromptRevisionRowSchema.parse(row));
+  }
+
+  function getRepoPromptRevision(
+    repo: string,
+    agent: RepoPromptAgent,
+    revisionId: number,
+  ): RepoPromptRevisionRow | null {
+    const parsed = RepoPromptRestoreInputSchema.parse({ agent, repo, revisionId });
+    const row = getRuntime().statements.getRepoPromptRevisionByKeyAndId.get(
+      parsed.repo,
+      parsed.agent,
+      parsed.revisionId,
+    );
+    return row == null ? null : RepoPromptRevisionRowSchema.parse(row);
+  }
+
+  function saveRepoPromptRevision(
+    input: { agent: RepoPromptAgent; body: string; repo: string; source: "edit" | "restore" },
+    opts: { allowDuplicateBody?: boolean } = {},
+  ): RepoPromptSaveResult {
+    const normalizedBody = normalizePromptBody(input.body);
+    const parsedBody = RepoPromptSaveInputSchema.parse({ body: normalizedBody }).body;
+    const parsedRepo = RepoSlugSchema.parse(input.repo);
+    const parsedAgent = RepoPromptAgentSchema.parse(input.agent);
+    const parsedSource = RepoPromptRevisionSourceSchema.parse(input.source);
+    let result: RepoPromptSaveResult | null = null;
+
+    getRuntime().saveRepoPromptRevisionTransaction(
+      {
+        agent: parsedAgent,
+        allowDuplicateBody: opts.allowDuplicateBody === true,
+        body: parsedBody,
+        bodySha256: hashPromptBody(parsedBody),
+        now: new Date().toISOString(),
+        repo: parsedRepo,
+        source: parsedSource,
+      },
+      (nextResult) => {
+        result = nextResult;
+      },
+    );
+
+    if (result === null) {
+      throw new Error("Repo prompt revision save did not complete");
+    }
+
+    return result;
+  }
+
+  function restoreRepoPromptToRevision(
+    repo: string,
+    agent: RepoPromptAgent,
+    revisionId: number,
+  ): RepoPromptRestoreResult {
+    const input = RepoPromptRestoreInputSchema.parse({ agent, repo, revisionId });
+    let result: RepoPromptRestoreResult | null = null;
+
+    getRuntime().restoreRepoPromptToRevisionTransaction(
+      {
+        agent: input.agent,
+        now: new Date().toISOString(),
+        repo: input.repo,
+        revisionId: input.revisionId,
+      },
+      (nextResult) => {
+        result = nextResult;
+      },
+    );
+
+    if (result === null) {
+      throw new Error("Repo prompt restore did not complete");
+    }
+
+    return result;
+  }
+
+  function deleteRepoPrompt(repo: string, agent: RepoPromptAgent): { deleted: boolean } {
+    const parsed = RepoPromptIdentifierSchema.parse({ agent, repo });
+    let result: { deleted: boolean } | null = null;
+
+    getRuntime().deleteRepoPromptTransaction(
+      { agent: parsed.agent, repo: parsed.repo },
+      (nextResult) => {
+        result = nextResult;
+      },
+    );
+
+    if (result === null) {
+      throw new Error("Repo prompt delete did not complete");
+    }
+
+    return result;
+  }
+
+  function listRepoPromptOverrides(opts: { repo?: string } = {}): Array<{
+    agent: RepoPromptAgent;
+    currentRevisionId: number;
+    repo: string;
+    revisionCount: number;
+    updatedAt: string;
+  }> {
+    const { statements } = getRuntime();
+    const rows =
+      opts.repo === undefined
+        ? statements.listRepoPromptOverrides.all()
+        : statements.listRepoPromptOverridesByRepo.all(RepoSlugSchema.parse(opts.repo));
+
+    return rows.map((row) => ({
+      agent: RepoPromptAgentSchema.parse(row.agent),
+      currentRevisionId: RepoPromptRowSchema.shape.currentRevisionId.parse(row.currentRevisionId),
+      repo: RepoSlugSchema.parse(row.repo),
+      revisionCount: Number(row.revisionCount),
+      updatedAt: RepoPromptRowSchema.shape.updatedAt.parse(row.updatedAt),
+    }));
+  }
+
   function close(): void {
     db.close();
   }
 
   return {
     close,
+    deleteRepoPrompt,
     getChildTaskResultsByRun,
     getPrompt,
     getPromptRevision,
     getPromptRevisions,
+    getRepoPrompt,
+    getRepoPromptRevision,
+    getRepoPromptRevisions,
     getRunById,
     getRunsByRepo,
     getSessionsByRun,
@@ -1403,11 +1963,14 @@ export function createDbModule(dbPath?: string, overrides: Partial<DbModuleDepen
     insertSessionPlaceholder,
     insertSubIssue,
     listRepositories,
+    listRepoPromptOverrides,
     listRunEvents,
     listRuns,
     resyncOrphanedRuns,
     restorePromptToRevision,
+    restoreRepoPromptToRevision,
     savePromptRevision,
+    saveRepoPromptRevision,
     seedPromptIfMissing,
     setRunPhase,
     setRunStatus,

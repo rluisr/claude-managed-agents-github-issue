@@ -10,6 +10,13 @@ export type BuildParentPromptParams = {
   parentIssueNumber: number;
   branch: string;
   baseBranch: string;
+  /**
+   * Repository-specific instructions appended to the runtime prompt as an
+   * additional section. The body is passed through verbatim. When omitted or
+   * blank, no extra section is rendered (preserving byte-identical output for
+   * repositories without an override).
+   */
+  repoPrompt?: string | null;
 };
 
 export function buildParentPrompt(params: BuildParentPromptParams): string {
@@ -26,9 +33,10 @@ export function buildParentPrompt(params: BuildParentPromptParams): string {
     parentIssueNumber,
     branch,
     baseBranch,
+    repoPrompt,
   } = params;
 
-  return `You are the ORCHESTRATOR. You do not edit code or run tests directly.
+  const basePrompt = `You are the ORCHESTRATOR. You do not edit code or run tests directly.
 Your goal is to resolve GitHub issue #${parentIssueNumber} in ${repoOwner}/${repoName} by decomposing it into smaller, manageable tasks and delegating them to child agents.
 
 MUST NOT edit files directly.
@@ -53,4 +61,24 @@ If child returns {success:false}, analyze error, generate corrective prompt with
 Step 4: After all children succeed, call \`create_final_pr\` custom tool with consolidated title/body to close the parent issue.
 
 Step 5: Emit \`session.status_idle\` by producing final \`agent.message\` with PR URL and exit.`;
+
+  const repoSection = renderRepoPromptSection(repoOwner, repoName, repoPrompt);
+  return repoSection === null ? basePrompt : `${basePrompt}\n\n${repoSection}`;
+}
+
+function renderRepoPromptSection(
+  repoOwner: string,
+  repoName: string,
+  repoPrompt: string | null | undefined,
+): string | null {
+  if (typeof repoPrompt !== "string") {
+    return null;
+  }
+
+  const trimmed = repoPrompt.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  return `## Repository-specific instructions for ${repoOwner}/${repoName}\n\n${trimmed}\n\nThese instructions take precedence over generic guidance when they conflict, but you MUST still respect the global guardrails above (no direct file edits, sub-task limits, etc.).`;
 }
